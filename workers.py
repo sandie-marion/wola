@@ -4,6 +4,7 @@ from torch.utils.data import DataLoader
 from gradients import flatten_gradients
 from losses import Loss
 from copy import deepcopy
+from DistribBatchProvider import DistribBatchProvider
 
 # Class for a worker
 ################################################################################################
@@ -29,10 +30,18 @@ class Worker:
         
         # Criterion setup
         self.criterion = Loss(criterion_name, worker_id, **criterion_parameters)
-                
+        
         # Local dataset
         self.train_loader = train_loader
-        self.class_proportion = 0
+
+        #WoLA specific loader : 
+        self.distrib_loader = None
+        if criterion_name == "WoLA" : 
+            self.distrib_loader = DistribBatchProvider(self.train_loader.dataset, 
+                                                       self.train_loader.batch_size, 
+                                                       self.criterion.loss.distrib, 
+                                                       self.criterion.loss.n_classes)
+    
 
 
     def compute_loss(self, outputs: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
@@ -60,6 +69,14 @@ class Worker:
                 # Update momentum: m = beta * m + (1 - beta) * g
                 self.gradient[param_idx] = grad
                 self.momentum[param_idx] = beta * self.momentum[param_idx] + (1 - beta) * grad
+                    
+        # Clear gradients for the next worker
+        model.zero_grad()
+
+    def compute_momentum_from_grad (self, model : nn.Module, beta:float) : 
+        with torch.no_grad():
+            for param_idx, param in enumerate(model.parameters()):
+                self.momentum[param_idx] = beta * self.momentum[param_idx] + (1 - beta) * self.gradient[param_idx]
                     
         # Clear gradients for the next worker
         model.zero_grad()

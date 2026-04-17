@@ -3,7 +3,7 @@ from utility import set_seed
 from models import get_model
 from defenses import Aggregator
 from attacks import Attack
-from worker_datasets import worker_distributions, load_data, heterogeneous_distributions
+from worker_datasets import worker_distributions, load_data, heterogeneous_distributions, get_dataset
 from training import stochastic_heavy_ball
 from workers import Workers
 import os
@@ -19,11 +19,11 @@ import json
 
 def get_attack_parameters(kwargs):
     if kwargs['attack_name'] == 'ALIE':
-        return {'n_workers': kwargs['n_workers'], 'f': kwargs['n_byzantine_workers']}
+        return {'n_workers' : kwargs['n_workers'], 'f': kwargs['n_byzantine_workers']}
     elif kwargs['attack_name'] == 'FOE':
-        return {'epsilon': 0.1}
+        return {'f' : kwargs['n_byzantine_workers']}
     elif kwargs['attack_name'] == 'Mimic':
-        return {'worker_id_to_duplicate':0}
+        return {'f':kwargs['n_byzantine_workers']}
     elif kwargs['attack_name'] == 'NNP':
         return {'n': kwargs['n_workers'], 'f': kwargs['n_byzantine_workers']}
     elif kwargs['attack_name'] == 'LF' :
@@ -44,7 +44,7 @@ def get_attack_parameters(kwargs):
 
 def get_aggregator_parameters(kwargs):
     if kwargs['aggregator_name'] == 'CwTM':
-        return {'q': kwargs['n_byzantine_workers']}
+        return {'f': kwargs['n_byzantine_workers']}
     elif kwargs['aggregator_name'] == 'RFA':
         return {'T': 10, 'nu': 0.1}
     elif kwargs['aggregator_name'] == 'Krum':
@@ -186,6 +186,8 @@ def run(kwargs: dict) -> None:
     # Initialize the model
     model = get_model(dataset_name, device)
 
+    train_set, test_set = get_dataset(dataset_name) 
+
     # Aggregator
     aggregator = Aggregator(aggregator_name, aggregator_parameters, pre_aggregator_name, pre_aggregator_parameters) 
 
@@ -195,7 +197,7 @@ def run(kwargs: dict) -> None:
     elif attack_name=='NNP':
         attack = Attack(attack_name = attack_name, **{ 'f':n_byzantine_workers, 'n':n_workers, 'robust_aggregator':aggregator, 'net':model})   
     else:
-        attack = Attack(attack_name = attack_name, **attack_parameters)   
+        attack = Attack(attack_name = attack_name, aggregator=aggregator, **attack_parameters)   
     
     if kwargs['heterogeneous_distribution'] : 
         print("distribution dirichlet per class")
@@ -224,6 +226,7 @@ def run(kwargs: dict) -> None:
     criterion_parameters['device'] = device
     criterion_parameters['local_distributions'] = honest_distributions
     criterion_parameters['Byzantine_local_distribution'] = Byzantine_distribution
+    criterion_parameters['n_classes'] = n_classes 
     
     # Initialize workers
     workers = Workers(n_honest_workers, n_byzantine_workers, worker_loaders, criterion_name, criterion_parameters, model)
@@ -234,7 +237,7 @@ def run(kwargs: dict) -> None:
 
     # Run the federated learning experiment
     print('Training', experiment_id, '/', n_experiments, ' starts.')
-    stochastic_heavy_ball(model, workers, aggregator, attack, test_loader, prop, kwargs)
+    stochastic_heavy_ball(model, workers, aggregator, attack, train_set, test_loader, prop, kwargs)
 
     # Log end
     print('Experiment ', experiment_id, 'ends.')
@@ -258,28 +261,29 @@ def parse_args():
 
 
 def multiple_exp () : 
-    # variable_parameters = {
-    #                         'attack_name': ['ALIE','FOE','Mimic','SF','PoisonedFL','MinMax','MinSum','NNP'],
-    #                         'aggregator_name': ['CWMed','CwTM','RFA','Krum','Mean'],
-    #                         'pre_aggregator_name': ['None','NNM','BKT','FoundFL'],
-    #                         'criterion_name': ['CrossEntropy','FedLC','DMFL'],
-    #                         'dataset_name': ['Purchase100', 'MNIST', 'CIFAR10', 'Fashion_MNIST'],
-    #                     }
+    variable_parameters = {
+                            'attack_name': ['ALIE', 'Mimic', 'FOE'],
+                            'aggregator_name': ['Krum'],
+                            'pre_aggregator_name': ['None'],
+                            'criterion_name': ["WoLA", "DistribWoLA"],
+                            'dataset_name': ['CIFAR10'],
+                            'n_byzantine_workers' : [2, 8, 12, 16, 20], 
+                            'alpha' : [1]
+                        }
 
-    variable_parameters = parse_args() 
     gpu_list = range(torch.cuda.device_count())
     gpu_selection = 0
     
 
     constant_parameters = {
                     'n_workers': 60,
-                    'batch_size': 32,
+                    'batch_size': 64,
                     'reg_param':1e-4,
                     'clip_param': 5,
                     'beta': 0.9,
                     'seed': 1,
-                    'experiment_folder':'test_eurosat',
-                    'heterogeneous_distribution' : 0,
+                    'experiment_folder':'test_wola_distrib',
+                    'heterogeneous_distribution' : 0
                 }
     
     experiment_folder = constant_parameters['experiment_folder']
@@ -336,10 +340,10 @@ def multiple_exp () :
         infered_parameters['n_experiments'] = n_experiments
         
         if all_parameters['dataset_name'] == 'MNIST' or all_parameters['dataset_name'] == 'EMNIST' or all_parameters['dataset_name'] == 'Fashion_MNIST' or all_parameters['dataset_name'] == 'EuroSAT' :
-            infered_parameters['n_step'] =  501
+            infered_parameters['n_step'] =  251
             infered_parameters['lr'] = lr_MNIST
         else:
-            infered_parameters['n_step'] =  1501 
+            infered_parameters['n_step'] =  501 
             infered_parameters['lr'] = lr_CIFAR10_Purchase100
 
         if experiment_id not in already_done : 
@@ -347,7 +351,7 @@ def multiple_exp () :
             experiments.append(kwargs)
 
     print("NB EXP :", len(experiments))
-    how_many_in_parallel = 8
+    how_many_in_parallel = 1
     mini_batch_of_combinations = split_list(experiments, how_many_in_parallel)
 
 
@@ -363,3 +367,8 @@ def multiple_exp () :
 
 if __name__ == "__main__" :     
     multiple_exp()
+
+
+
+    # test mini wola : 
+    # gi(t+1) <- miniwola(t+1) + g(t) - miniwola(t)

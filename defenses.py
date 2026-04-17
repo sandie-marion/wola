@@ -1,6 +1,5 @@
 import torch
 from utility import euclidean_distance
-from Defenses.HullGuard import HullGuard
 from math import floor 
 from byzfl.utils.misc import check_vectors_type, distance_tool, random_tool
 
@@ -52,8 +51,7 @@ class Aggregator:
             return coordinate_wise_median
             
         elif self.aggregator_name == 'CwTM':
-            return lambda inputs: coordinate_wise_trimmed_mean(inputs, **self.aggregator_args)
-        
+            return TrMean(**self.aggregator_args)
         elif self.aggregator_name == 'RFA':
             return lambda inputs: rfa(inputs, **self.aggregator_args)
         
@@ -307,6 +305,7 @@ def multi_krum(inputs: list[torch.Tensor] | torch.Tensor, f: int) -> torch.Tenso
     Returns:
         torch.Tensor: A tensor of shape (d,) representing the aggregated vector.
     """
+    
     inputs = torch.stack(inputs, dim=0)
 
     n, d = inputs.shape

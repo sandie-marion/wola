@@ -5,7 +5,6 @@ from collections import Counter
 from torch.utils.data import DataLoader, Subset
 from torchvision import datasets, transforms
 
-from data.Purchase100 import Purchase100Dataset
 from utility import flatten
 
 from torch.utils.data import random_split
@@ -195,10 +194,6 @@ def get_dataset(dataset_name: str) -> tuple:
 
         train_set, test_set = random_split(global_set, [0.85, 0.15])
         
-        
-    elif dataset_name == "Purchase100":
-        train_set = Purchase100Dataset(train_bool=True)
-        test_set = Purchase100Dataset(train_bool=False)
         
     else: 
         raise ValueError(f"Unsupported dataset: {dataset_name}")

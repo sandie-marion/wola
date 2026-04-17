@@ -5,16 +5,90 @@ import numpy as np
 import matplotlib.pyplot as plt
 from IPython.display import clear_output
 from utility import Statistics, save 
-from Defenses.HullGuard import DistributionAttack
+from torch.utils.data import Subset, DataLoader 
+from copy import deepcopy 
 
-from gradients import model_parameters_format, gradient_dissimilarity
+from gradients import model_parameters_format, gradient_dissimilarity, flatten_gradients
 from time import time 
 
 from collections import Counter 
 
+
+class ClassWiseGradients :
+    def __init__ (self, device, dataset, n_classes, reg_param, clip_param) :
+        self.device = device 
+        self.dataset = dataset 
+        self.n_classes = n_classes 
+        self.reg_param = reg_param 
+        self.clip_param = clip_param 
+        
+        targets = dataset.targets
+        self.n_targets = len(targets) 
+        self.class_wise_gradients = [None for i in range (n_classes)] 
+        self.global_class_prop = [0 for i in range (n_classes)]
+        if not isinstance(targets, torch.Tensor):
+            targets = torch.tensor(targets)
+
+        self.indices_of_classes = [(targets == class_idx).nonzero(as_tuple=True)[0].tolist() for class_idx in range(n_classes)]
+
+
+    def generate_class_wise_datasets (self, c) : 
+        class_dataset = Subset (self.dataset, self.indices_of_classes[c])
+        n_targets_c = len(self.indices_of_classes[c]) 
+
+        loader = DataLoader(class_dataset, batch_size=32) 
+        return loader, n_targets_c/self.n_targets 
+
+
+    def get_class_wise_gradients (self, model, loss_fct) : 
+        
+        for c in range (self.n_classes) : 
+            gradient = [torch.zeros_like(param) for param in model.parameters()] 
+            model.train() 
+            model.zero_grad() 
+
+            loader, prop = self.generate_class_wise_datasets(c) 
+        
+            for inputs, labels in loader : 
+                inputs, labels = inputs.to(self.device), labels.to(self.device)
+                outputs = model(inputs)    
+                loss = loss_fct(outputs, labels)
+                loss.backward()
+            
+            #extract gradient from model update
+            with torch.no_grad():
+                for param_idx, param in enumerate(model.parameters()):
+                    if param.grad is None:
+                        continue
+    
+                    # Get gradient (of param) from local dataset
+                    grad = param.grad.clone().detach() 
+                    
+                    # Store gradient
+                    gradient[param_idx] = grad
+                gradient = flatten_gradients(gradient)
+    
+            self.class_wise_gradients[c] = gradient
+            self.global_class_prop[c] = prop 
+            
+
+    def update_worker_gradient (self, model, worker, target_batch) : 
+        counts = list(torch.bincount(target_batch, minlength=self.n_classes))
+        
+        final_gradient = flatten_gradients(worker.gradient)
+        for c, count in enumerate(counts) : 
+            if count == 0 : 
+                gradient = self.class_wise_gradients[c] 
+                prop = self.global_class_prop[c] 
+                gradient = torch.mul(gradient.to(self.device), prop) 
+                final_gradient = torch.add(final_gradient.to(self.device), gradient.to(self.device)) 
+        final_gradient = model_parameters_format(final_gradient, model) 
+        return final_gradient 
+            
+
 # Descent algorithm
 ################################################################################################
-def stochastic_heavy_ball(model, workers, aggregator, attack, test_loader, prop_class, kwargs):
+def stochastic_heavy_ball(model, workers, aggregator, attack, train_dataset, test_loader, prop_class, kwargs):
     """
     The stochastic heavy ball algorithm is described in detail in Fixing by Mixing: A Recipe for Optimal Byzantine ML under Heterogeneity.
     """
@@ -37,60 +111,60 @@ def stochastic_heavy_ball(model, workers, aggregator, attack, test_loader, prop_
     statistics_to_save = Statistics()
     step = 0
 
-    if aggregator_name=='HullGuard':
-        filterscores_to_save = Statistics()
-        hullguard_attack = kwargs['hullguard_attack_param']
-        dist_attack = DistributionAttack(hullguard_attack, n_classes, n_honest_workers) # dirac, uniform, random, projection
+    class_grad = ClassWiseGradients(device, train_dataset, n_classes, reg_param, clip_param) 
 
     worker_iters = [iter(loader) for loader in workers.loaders()]
 
-    if aggregator_name=='HullGuard':
-        dist_attack = DistributionAttack('uniform', n_classes, n_honest_workers) # dirac, uniform, random, projection
-
+    row_aggregated_momentum = flatten_gradients([torch.zeros_like(param) for param in model.parameters()])
 
     for step in range (0, n_step) :
         start = time() 
+        print(step)
         
         for worker_id in range (0, n_workers) : 
-
             model.train() 
             running_loss = 0.0
 
-            try : 
-                batch = next(worker_iters[worker_id])
-            except :
-                worker_iters[worker_id] = iter(workers.loaders()[worker_id])
-                batch = next(worker_iters[worker_id])
+            if kwargs['criterion_name'] == "DistribWoLA" : 
+                batch = workers[worker_id].distrib_loader.get_batch() 
+            else :
+                try : 
+                    batch = next(worker_iters[worker_id])
+                except :
+                    worker_iters[worker_id] = iter(workers.loaders()[worker_id])
+                    batch = next(worker_iters[worker_id])
                 
             inputs, labels = batch 
-            minibatch_distrib = get_distribution(labels, n_classes)
                     
             # if an honest worker
-            if workers[worker_id].honest:                                
+            if workers[worker_id].honest: 
+                print("worker id :", worker_id)
                 model.zero_grad()
                 
                 inputs, labels = inputs.to(device), labels.to(device)
          
                 outputs = model(inputs)
+                print("computed output") 
 
                 reg = regularization(model, reg_param)
                 
                 loss = workers[worker_id].compute_loss(outputs, labels) + reg
+                print("computed loss") 
                 
                 loss.backward()
 
                 clip_grad_norm(model, clip_param)
                 
                 running_loss += loss.item()/n_honest_workers
-        
-                workers[worker_id].compute_momentum(model, beta)
 
-                counts = torch.bincount(labels, minlength=n_classes)     
-                proportions = counts.float() / labels.numel()
-                workers[worker_id].class_proportion = beta * workers[worker_id].class_proportion + (1 - beta) * proportions
-            
+                workers[worker_id].compute_momentum(model, beta) #worker.gradient stores the miniWoLA update 
+                print("momentum") 
+                
+                    
+
             # if a Byzantine worker
             else:
+                print("dishonest worker id :", worker_id) 
                 # step, net, worker, inputs, labels, row_honest_gradients, device
                 row_honest_gradients = workers.get_momentums(only_honest = True, row = True)
                 row_bad_gradient = attack(step, model, workers[worker_id], inputs, labels, row_honest_gradients, device)
@@ -99,22 +173,10 @@ def stochastic_heavy_ball(model, workers, aggregator, attack, test_loader, prop_
 
         # Update model
         with torch.no_grad():
+            print("update model") 
             row_momentums = workers.get_momentums(only_honest = False, row = True)
 
-            if aggregator_name=='HullGuard':
-                class_proportions = workers.get_class_proportions()
-                byz_dist = dist_attack(row_momentums, class_proportions).detach()
-                for worker_id in range(n_workers):
-                    if not workers[worker_id].honest:
-                        workers[worker_id].class_proportion = byz_dist
-            
-                class_proportions = workers.get_class_proportions()
-                row_aggregated_momentum, filter_score = aggregator(row_momentums, class_proportions)
-                filterscores_to_save.append("filter_score", filter_score) 
-                
-            else:
-                row_aggregated_momentum = aggregator(row_momentums)
-            
+            row_aggregated_momentum = aggregator(row_momentums)
             
             unrow_aggregated_momentum = model_parameters_format(row_aggregated_momentum, model)
             for param_idx, param in enumerate(model.parameters()):
@@ -148,8 +210,6 @@ def stochastic_heavy_ball(model, workers, aggregator, attack, test_loader, prop_
 
 
     # Save statistics
-    if aggregator_name == "HullGuard" : 
-        save(data = filterscores_to_save.data, name = 'filter_score', experiment_id = kwargs['experiment_id'], experiment_folder = kwargs['experiment_folder'])
     save(data = statistics_to_save.data, name = 'statistics', experiment_id = kwargs['experiment_id'], experiment_folder = kwargs['experiment_folder'])
     del statistics_to_save
     del inputs, labels, outputs

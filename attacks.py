@@ -6,12 +6,14 @@ from training import regularization, clip_grad_norm
 # Attacks involving complex code
 from Attacks.nearest_neighbor_poisoning import NearestNeighborPoisoning
 from Attacks.poisoned_fl import PoisonedFL
+from byzfl.utils.misc import check_vectors_type
+
 
 # Class Attacks
 ################################################################################################
 ################################################################################################
 class Attack:
-    def __init__(self, attack_name, **kwargs):
+    def __init__(self, attack_name, aggregator, **kwargs):
         """
         Wrapper for different Byzantine attack strategies
         """
@@ -26,17 +28,17 @@ class Attack:
             
         elif  self.name == 'Mimic':
             # Mimic attack
-            mimic = Mimic(**kwargs)
+            mimic = Mimic(aggregator, **kwargs)
             self.attack = mimic
 
         elif self.name =='ALIE':
             # A Little Is Enough attack
-            alie = ALittleIsEnough(**kwargs)
+            alie = ALittleIsEnough(aggregator, **kwargs)
             self.attack = alie
             
         elif self.name == 'FOE':
             # Fall of Empires attack
-            foe = FallOfEmpires(**kwargs)
+            foe = FallOfEmpires(aggregator, **kwargs)
             self.attack = foe
         
         elif self.name == 'SF':
@@ -86,7 +88,9 @@ class Attack:
                 self.byzantine_row_gradient = self.attack(step, net, row_honest_gradients)
             else:
                 # Apply chosen attack to honest gradients
+                # for several fixed hyperparameters, 
                 self.byzantine_row_gradient = self.attack(row_honest_gradients)
+                # aggreger les gradients 
             # Remember current step to avoid recomputation
             self.step = step
         # Return cached malicious gradient
@@ -180,14 +184,62 @@ class Mimic:
     """
     Mimic attack: returns the update of a chosen honest worker.
     """
-    def __init__(self, worker_id_to_duplicate: int):
-        self.idx = int(worker_id_to_duplicate)
+    def __init__(self, aggregator, f):
+        self.f = f
+        self.agg = aggregator 
+        self.pre_agg_list = [] 
+        
+
+    
+    def mimic (self, row_honest_gradients, worker_id) : 
+        selected = row_honest_gradients[worker_id]
+        # Return a clone 
+        return selected.clone()
+
+        
+    def evaluate(self, honest_vectors, avg_honest_vector, n_honest_workers):
+       
+        """
+        Computes the norm of the distance between the aggregated vector (including Byzantine vectors) and the average of honest vectors.
+        """
+
+        tools, honest_vectors = check_vectors_type(honest_vectors)
+
+        #Compute Byzantine vector
+        best_distance = 100000
+        best_id = 0 
+        for i in range (n_honest_workers) : 
+                
+            byzantine_vector = self.mimic(honest_vectors, i)
+            byzantine_vectors = tools.array([byzantine_vector] * self.f)
+    
+            #Aggregate vectors with current Byzantine vectors
+            vectors = tools.concatenate((honest_vectors, byzantine_vectors), axis=0)
+            for pre_agg in self.pre_agg_list:
+                vectors = pre_agg(vectors)
+            aggregated_vector = self.agg(list(vectors))
+    
+            #Return distance between aggregate vector and mean of honest vectors
+            distance = tools.subtract(aggregated_vector, avg_honest_vector)
+            dist = tools.linalg.norm(distance).item()
+            if dist > best_distance : 
+                best_distance = dist
+                best_id = i 
+                
+        return best_id 
 
     @torch.no_grad()
     def __call__(self, row_honest_gradients: List[torch.Tensor]) -> torch.Tensor:
-        selected = row_honest_gradients[self.idx]
-        # Return a clone 
-        return selected.clone()
+
+        if not row_honest_gradients:
+            raise ValueError("empty input")
+        G = torch.stack(row_honest_gradients, dim=0)
+        tools, honest_vectors = check_vectors_type(G)
+        avg_honest_vector = tools.mean(honest_vectors, axis=0)
+        
+        best_id = self.evaluate(honest_vectors, avg_honest_vector, len(row_honest_gradients)) 
+        
+        return self.mimic(row_honest_gradients, best_id) 
 
 # A Little Is Enough
 ################################################################################################
@@ -195,19 +247,104 @@ class ALittleIsEnough:
     """
     Attack: return mu + z_max * sigma where z_max is the Gaussian quantile.
     """
-    def __init__(self, n_workers: int, f: int):
-        s = math.floor(n_workers / 2 + 1) - f
-        p = (n_workers - s) / n_workers
-        self.z_max = math.sqrt(2.0) * torch.erfinv(torch.tensor(2.0 * p - 1.0)).item()
+    def __init__(self, aggregator, n_workers, f):
+        self.f = f 
+        self.pre_agg_list = []
+        self.agg = aggregator 
+        self.evals = 20 
+        self.delta = 10.0 
+        self.ratio = 0.8
+        self.start = 0.0
 
+    
+    def alie (self, row_honest_gradients, tau:float) -> torch.Tensor:
+        mu = row_honest_gradients.mean(dim=0)
+        sigma = row_honest_gradients.std(dim=0, unbiased=False)
+        return mu + sigma * tau
+
+
+    def _evaluate(self, honest_vectors, avg_honest_vector, current_tau):
+       
+        """
+        Computes the norm of the distance between the aggregated vector (including Byzantine vectors) and the average of honest vectors.
+        """
+
+        tools, honest_vectors = check_vectors_type(honest_vectors)
+
+        #Compute Byzantine vector
+        byzantine_vector = self.alie(honest_vectors, current_tau)
+        byzantine_vectors = tools.array([byzantine_vector] * self.f)
+
+        #Aggregate vectors with current Byzantine vectors
+        vectors = tools.concatenate((honest_vectors, byzantine_vectors), axis=0)
+        for pre_agg in self.pre_agg_list:
+            vectors = pre_agg(vectors)
+        aggregated_vector = self.agg(list(vectors))
+
+        #Return distance between aggregate vector and mean of honest vectors
+        distance = tools.subtract(aggregated_vector, avg_honest_vector)
+        return tools.linalg.norm(distance).item()
+
+
+    
+    def expansion_phase (self, honest_vectors, avg_honest_vector) : 
+        best_x = self.start
+        best_y = self._evaluate(honest_vectors, avg_honest_vector, best_x)
+        delta = self.delta
+        remaining_evals = self.evals - 1
+
+        while remaining_evals > 0:
+            prop_x = best_x + delta
+            prop_y = self._evaluate(honest_vectors, avg_honest_vector, prop_x)
+            remaining_evals -= 1
+
+            if prop_y > best_y:
+                # If the new value is better: Update best_x, double the step size (delta *= 2), and continue exploring.
+                best_x, best_y = prop_x, prop_y
+                delta *= 2
+            else:
+                # If the new value is worse: Stop the expansion phase and proceed to contraction.
+                delta *= self.ratio
+                break
+
+        return best_x, best_y, delta, remaining_evals
+
+    
+    def contraction_phase(self, honest_vectors, avg_honest_vector, best_x, best_y, delta, remaining_evals):
+
+        """
+        Performs the contraction phase of the optimization.
+        This phase refines the search by reducing the step size (delta) and searching around the current best value.
+        """
+        while remaining_evals > 0:
+            # Continue reducing the step size until no significant improvements are found or evaluations are exhausted.
+            prop_x = best_x + delta
+            prop_y = self._evaluate(honest_vectors, avg_honest_vector, prop_x)
+            remaining_evals -= 1
+
+            if prop_y > best_y:
+                # If a better value is found: Update best_x and best_y.
+                best_x, best_y = prop_x, prop_y
+
+            delta *= self.ratio
+
+        return best_x
+
+    
     @torch.no_grad()
     def __call__(self, row_honest_gradients: List[torch.Tensor]) -> torch.Tensor:
         if not row_honest_gradients:
             raise ValueError("empty input")
         G = torch.stack(row_honest_gradients, dim=0)
-        mu = G.mean(dim=0)
-        sigma = G.std(dim=0, unbiased=False)
-        return mu + sigma * float(self.z_max)
+        tools, honest_vectors = check_vectors_type(G)
+        avg_honest_vector = tools.mean(honest_vectors, axis=0)
+
+        # Expansion Phase
+        best_tau, largest_distance, delta, remaining_evals = self.expansion_phase(honest_vectors, avg_honest_vector)
+        best_tau = self.contraction_phase(honest_vectors, avg_honest_vector, best_tau, largest_distance, delta, remaining_evals) 
+        
+        # Set the best attack factor and execute IPM
+        return self.alie(honest_vectors, best_tau)
 
 # Fall of Empires
 ################################################################################################
@@ -216,14 +353,106 @@ class FallOfEmpires:
     Attack: return a scaled and sign-flipped version of the mean honest gradient.
     g_bad = -epsilon * mean( honest_gradients )
     """
-    def __init__(self, epsilon: float):
-        self.epsilon = float(epsilon)
+    def __init__(self, aggregator, f):
+        self.f = f 
+        self.pre_agg_list = []
+        self.agg = aggregator 
+        self.evals = 20 
+        self.delta = 10.0 
+        self.ratio = 0.8
+        self.start = 0.0
+        
 
+    def foe (self, row_honest_gradients, tau) : 
+        mu = row_honest_gradients.mean(dim=0)
+        return -tau * mu
+
+
+
+    def _evaluate(self, honest_vectors, avg_honest_vector, current_tau):
+       
+        """
+        Computes the norm of the distance between the aggregated vector (including Byzantine vectors) and the average of honest vectors.
+        """
+
+        tools, honest_vectors = check_vectors_type(honest_vectors)
+
+        #Compute Byzantine vector
+        byzantine_vector = self.foe(honest_vectors, current_tau)
+        byzantine_vectors = tools.array([byzantine_vector] * self.f)
+
+        #Aggregate vectors with current Byzantine vectors
+        vectors = tools.concatenate((honest_vectors, byzantine_vectors), axis=0)
+        for pre_agg in self.pre_agg_list:
+            vectors = pre_agg(vectors)
+        aggregated_vector = self.agg(list(vectors))
+
+        #Return distance between aggregate vector and mean of honest vectors
+        distance = tools.subtract(aggregated_vector, avg_honest_vector)
+        return tools.linalg.norm(distance).item()
+
+
+    
+    def expansion_phase (self, honest_vectors, avg_honest_vector) : 
+        best_x = self.start
+        best_y = self._evaluate(honest_vectors, avg_honest_vector, best_x)
+        delta = self.delta
+        remaining_evals = self.evals - 1
+
+        while remaining_evals > 0:
+            prop_x = best_x + delta
+            prop_y = self._evaluate(honest_vectors, avg_honest_vector, prop_x)
+            remaining_evals -= 1
+
+            if prop_y > best_y:
+                # If the new value is better: Update best_x, double the step size (delta *= 2), and continue exploring.
+                best_x, best_y = prop_x, prop_y
+                delta *= 2
+            else:
+                # If the new value is worse: Stop the expansion phase and proceed to contraction.
+                delta *= self.ratio
+                break
+
+        return best_x, best_y, delta, remaining_evals
+
+    
+    def contraction_phase(self, honest_vectors, avg_honest_vector, best_x, best_y, delta, remaining_evals):
+
+        """
+        Performs the contraction phase of the optimization.
+        This phase refines the search by reducing the step size (delta) and searching around the current best value.
+        """
+        while remaining_evals > 0:
+            # Continue reducing the step size until no significant improvements are found or evaluations are exhausted.
+            prop_x = best_x + delta
+            prop_y = self._evaluate(honest_vectors, avg_honest_vector, prop_x)
+            remaining_evals -= 1
+
+            if prop_y > best_y:
+                # If a better value is found: Update best_x and best_y.
+                best_x, best_y = prop_x, prop_y
+
+            delta *= self.ratio
+
+        return best_x
+
+    
     @torch.no_grad()
     def __call__(self, row_honest_gradients: List[torch.Tensor]) -> torch.Tensor:
+        if not row_honest_gradients:
+            raise ValueError("empty input")
         G = torch.stack(row_honest_gradients, dim=0)
-        mu = G.mean(dim=0)
-        return -self.epsilon * mu
+        tools, honest_vectors = check_vectors_type(G)
+        avg_honest_vector = tools.mean(honest_vectors, axis=0)
+
+        # Expansion Phase
+        best_tau, largest_distance, delta, remaining_evals = self.expansion_phase(honest_vectors, avg_honest_vector)
+        best_tau = self.contraction_phase(honest_vectors, avg_honest_vector, best_tau, largest_distance, delta, remaining_evals) 
+        
+        # Set the best attack factor and execute IPM
+        return self.foe(honest_vectors, best_tau)
+
+        
 
 # Min-Max
 ################################################################################################
