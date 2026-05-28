@@ -39,7 +39,7 @@ def get_attack_parameters(kwargs):
                 'clip_param' : kwargs['clip_param'], 
                 'beta' : kwargs['beta']
                 }
-    elif kwargs['attack_name'] == 'MinSum' : 
+    elif kwargs['attack_name'] == 'MinSum' or kwargs['attack_name'] == 'MinMax': 
         return {
             'f' : kwargs['n_byzantine_workers'], 
             'gamma_init' : 10.0, 
@@ -265,7 +265,7 @@ def parse_args():
     return ( load_config(args.config) )
 
 
-def multiple_exp () : 
+def multiple_exp (variable_parameters) : 
 
 
     #                         'attack_name': ['ALIE','FOE','Mimic','SF','PoisonedFL','MinMax','MinSum','NNP'],
@@ -274,23 +274,15 @@ def multiple_exp () :
     #                         'criterion_name': ['CrossEntropy','FedLC','DMFL'],
     #                         'dataset_name': ['Purchase100', 'MNIST', 'CIFAR10', 'Fashion_MNIST'],
 
-    variable_parameters = {
-                            'attack_name': ['ALIE', 'Mimic', 'FOE', 'LF', 'MinSum'],
-                            'aggregator_name': ['CWMed', 'CwTM', 'RFA'],
-                            'pre_aggregator_name': ['NNM'],
-                            'criterion_name': ["NorthStar", "CrossEntropy"],
-                            'dataset_name': ['MNIST', 'CIFAR10', 'Fashion_MNIST'],
-                            'n_byzantine_workers' : [2, 8, 14, 20, 26], 
-                            'alpha' : [10, 1, 0.1]
-                        }
 
-    gpu_list = [0, 1, 2, 3]
+
+    gpu_list = []
     gpu_selection = 0
     
 
     constant_parameters = {
-                    'n_workers': 60,
-                    'batch_size': 128,
+                    'n_workers': 5,
+                    'batch_size': 8,
                     'reg_param':1e-3,
                     'clip_param': 5,
                     'beta': 0.9,
@@ -353,13 +345,13 @@ def multiple_exp () :
         infered_parameters['n_experiments'] = n_experiments
         
         if all_parameters['dataset_name'] == 'MNIST' or all_parameters['dataset_name'] == 'EMNIST' or all_parameters['dataset_name'] == 'Fashion_MNIST' or all_parameters['dataset_name'] == 'KMNIST' :
-            infered_parameters['n_step'] =  501
+            infered_parameters['n_step'] =  5
             infered_parameters['lr'] = lr_MNIST
         elif all_parameters['dataset_name'] == 'EuroSAT' or all_parameters['dataset_name'] == 'STL10'  : 
-            infered_parameters['n_step'] =  501
+            infered_parameters['n_step'] =  5
             infered_parameters['lr'] = lr_EuroSAT
         else:
-            infered_parameters['n_step'] =  801 
+            infered_parameters['n_step'] =  8
             infered_parameters['lr'] = lr_CIFAR10_Purchase100
 
         if experiment_id not in already_done : 
@@ -367,7 +359,7 @@ def multiple_exp () :
             experiments.append(kwargs)
 
     print("NB EXP :", len(experiments))
-    how_many_in_parallel = len(gpu_list)*2
+    how_many_in_parallel = len(gpu_list)*2 if len(gpu_list) > 0 else 1 
     mini_batch_of_combinations = split_list(experiments, how_many_in_parallel)
 
     torch.multiprocessing.set_start_method('spawn')
@@ -380,7 +372,17 @@ def multiple_exp () :
         torch.cuda.empty_cache()
         gc.collect()
 
-if __name__ == "__main__" :     
-    multiple_exp()
+if __name__ == "__main__" :   
+    variable_parameters = {
+
+                        'attack_name': ['ALIE','FOE','Mimic','SF','PoisonedFL','MinMax','MinSum','NNP'],
+                        'aggregator_name': ['CWMed','CwTM','RFA','Krum','Mean'],
+                        'pre_aggregator_name': ['None','NNM','BKT'],
+                        'criterion_name': ['CrossEntropy','FedLC','DMFL'],
+                        'dataset_name': ['MNIST'],
+                        'n_byzantine_workers' : [2], 
+                        'alpha' : [10]
+                    }  
+    multiple_exp(variable_parameters)
 
 

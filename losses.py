@@ -108,6 +108,7 @@ class DMFL:
         device: torch.device,
         local_distributions: Tensor,
         Byzantine_local_distribution: Tensor,
+        n_classes:int,
         worker_id: int,
         T: float = 1e-1
     ):
