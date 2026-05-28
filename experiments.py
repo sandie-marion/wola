@@ -278,7 +278,7 @@ def multiple_exp () :
                             'attack_name': ['ALIE', 'Mimic', 'FOE', 'LF', 'MinSum'],
                             'aggregator_name': ['CWMed', 'CwTM', 'RFA'],
                             'pre_aggregator_name': ['NNM'],
-                            'criterion_name': ["DistribWoLA", "CrossEntropy"],
+                            'criterion_name': ["NorthStar", "CrossEntropy"],
                             'dataset_name': ['MNIST', 'CIFAR10', 'Fashion_MNIST'],
                             'n_byzantine_workers' : [2, 8, 14, 20, 26], 
                             'alpha' : [10, 1, 0.1]
@@ -295,7 +295,7 @@ def multiple_exp () :
                     'clip_param': 5,
                     'beta': 0.9,
                     'seed': 1,
-                    'experiment_folder':'test_wola',
+                    'experiment_folder':'experiments',
                     'heterogeneous_distribution' : 0
                 }
     

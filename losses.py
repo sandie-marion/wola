@@ -16,20 +16,14 @@ class Loss:
         if self.name == 'CrossEntropy':
             self.loss = nn.CrossEntropyLoss()
 
-        elif self.name =='WoLA' or self.name =='WoLA_under_attack' :
-            self.loss = WoLA(worker_id=worker_id, **kwargs)
-
         elif self.name =='FedLC':
             self.loss = FedLC(worker_id=worker_id,**kwargs)
 
         elif self.name =='DMFL':
             self.loss = DMFL(worker_id=worker_id,**kwargs)
-        
-        elif self.name == "MiniWoLA" or self.name == 'ClassWoLA' : 
-            self.loss = MiniBatchWoLA(worker_id=worker_id, **kwargs) 
 
-        elif self.name == "DistribWoLA" : 
-            self.loss = DistribWoLA(worker_id=worker_id, **kwargs)
+        elif self.name == "NorthStar" : 
+            self.loss = NorthStar(worker_id=worker_id, **kwargs)
 
         else:
             print(self.name)
@@ -38,102 +32,9 @@ class Loss:
     def __call__(self, outputs: Tensor, labels: Tensor) -> Tensor:
         return self.loss(outputs, labels)
 
-# WoLA
-################################################################################################
-
-class WoLA:
-    def __init__(
-        self,
-        device: torch.device,
-        local_distributions: Tensor,
-        Byzantine_local_distribution: Tensor,
-        n_classes:int,
-        worker_id: int,
-        epsilon: float = 1e-3, 
-        under_attack: bool = False,
-    ):
-        """
-        Worker Label Alignment loss (WoLA).
-        Computes class weights based on local vs global data imbalance.
-        """
-        self.device = torch.device(device)
-        self.distrib = None
-        self.n_classes = n_classes 
-        
-        if under_attack:
-            self.weight = self.get_weight_under_attack(local_distributions, Byzantine_local_distribution, worker_id, epsilon)
-        else:
-            self.weight = self.get_weight(local_distributions, Byzantine_local_distribution, worker_id, epsilon)
-               
-
-    def get_weight(self, local_distributions: Tensor, Byzantine_local_distribution: Tensor, worker_id: int, epsilon: float) -> Tensor:
-        """
-        Compute per-class weights based on global and local distributions.
-        """
-        # Compute global distribution
-        global_count = local_distributions.sum(dim=0)
-        global_total = global_count.sum()
-        global_distribution = global_count / global_total
-        self.distrib = list(global_distribution) 
-
-        # Compute local distribution
-        honest_and_Byzantine_distributions = torch.cat((local_distributions, Byzantine_local_distribution), dim=0)
-        local_count = honest_and_Byzantine_distributions[worker_id]
-        local_total = local_count.sum()
-        local_distribution = local_count / local_total
-
-        # Compute weight
-        weight = global_distribution / (local_distribution + epsilon) 
-        return weight.float().to(self.device)
-
-    
-    def get_weight_under_attack(self, local_distributions: Tensor, Byzantine_local_distribution: Tensor, worker_id: int, epsilon: float) -> Tensor:
-        """
-        Compute per-class weights based on global and local distributions.
-        """
-        # Compute local distribution (even for Byzantine workers, although this is not used in the following, we do it for code consistency)
-        honest_and_Byzantine_distributions = torch.cat((local_distributions, Byzantine_local_distribution), dim=0)
-        local_count = honest_and_Byzantine_distributions[worker_id]
-        local_total = local_count.sum()
-        local_distribution = local_count / local_total
-    
-        # Compute global distribution (impacted by Byzantine attack)
-        
-        ## Least common class
-        global_honest_count = local_distributions.sum(dim=0)
-        least_common_class = torch.argmin(global_honest_count)
-
-        ## Compute worst Byzantine distribution (i.e., all mass on the least common class)
-        total_Byzantine_count = Byzantine_local_distribution.sum(dim=1)
-        worst_Byzantine_local_distribution = torch.zeros_like(Byzantine_local_distribution)    
-        worst_Byzantine_local_distribution[:, least_common_class] = total_Byzantine_count
-
-        ## Compute robust distribution
-        honest_and_worst_Byzantine_distributions = torch.cat((local_distributions, worst_Byzantine_local_distribution), dim=0)
-        global_count = rfa([d.float() for d in honest_and_worst_Byzantine_distributions])
-        global_total = global_count.sum()
-        global_distribution = global_count / global_total
-        
-        # Compute weight
-        weight = global_distribution / (local_distribution + epsilon)
-        return weight.float().to(self.device)
 
         
-    def __call__(self, logits: Tensor, targets: Tensor) -> Tensor:
-        """
-        Compute weighted cross-entropy.
-        """
-        logits = logits.to(self.device)
-        targets = targets.to(self.device)
-        
-        log_probs = torch.log_softmax(logits, dim=1)
-        loss_per_sample = -log_probs[torch.arange(len(targets)), targets]
-        loss_per_sample = loss_per_sample * self.weight[targets]
-
-        return loss_per_sample.mean()
-
-        
-class DistribWoLA:
+class NorthStar:
     def __init__(
         self,
         device: torch.device,
@@ -162,187 +63,6 @@ class DistribWoLA:
 
     def __call__ (self, logits : Tensor, targets : Tensor) -> Tensor : 
         return self.loss(logits, targets) 
-
-
-# Wola Minibatch 
-
-class MiniBatchWoLA:
-    def __init__(
-        self,
-        device: torch.device,
-        local_distributions: Tensor,
-        Byzantine_local_distribution: Tensor,
-        n_classes:int, 
-        worker_id: int,
-        epsilon: float = 1e-3, 
-        under_attack: bool = False,
-    ):
-        """
-        Worker Label Alignment loss (WoLA).
-        Computes class weights based on local vs global data imbalance.
-        """
-        self.device = torch.device(device)
-        self.global_distrib = None 
-        self.epsilon = None
-        self.n_classes = n_classes
-        
-        if under_attack:
-            self.get_global_distribution_under_attack(local_distributions, Byzantine_local_distribution, worker_id, epsilon)
-        else:
-            self.get_global_distribution(local_distributions, Byzantine_local_distribution, worker_id, epsilon)
-               
-
-    def get_global_distribution(self, local_distributions: Tensor, Byzantine_local_distribution: Tensor, worker_id: int, epsilon: float) -> Tensor:
-        """
-        Compute per-class weights based on global and local distributions.
-        """
-        # Compute global distribution
-        global_count = local_distributions.sum(dim=0)
-        global_total = global_count.sum()
-        self.global_distrib = global_count / global_total
-        self.epsilon = epsilon
-
-    
-    def get_global_distribution_under_attack(self, local_distributions: Tensor, Byzantine_local_distribution: Tensor, worker_id: int, epsilon: float) -> Tensor:
-        """
-        Compute per-class weights based on global and local distributions.
-        """   
-        # Compute global distribution (impacted by Byzantine attack)
-        
-        ## Least common class
-        global_honest_count = local_distributions.sum(dim=0)
-        least_common_class = torch.argmin(global_honest_count)
-
-        ## Compute worst Byzantine distribution (i.e., all mass on the least common class)
-        total_Byzantine_count = Byzantine_local_distribution.sum(dim=1)
-        worst_Byzantine_local_distribution = torch.zeros_like(Byzantine_local_distribution)    
-        worst_Byzantine_local_distribution[:, least_common_class] = total_Byzantine_count
-
-        ## Compute robust distribution
-        honest_and_worst_Byzantine_distributions = torch.cat((local_distributions, worst_Byzantine_local_distribution), dim=0)
-        global_count = rfa([d.float() for d in honest_and_worst_Byzantine_distributions])
-        global_total = global_count.sum()
-        self.global_distrib = global_count / global_total
-        self.epsilon = epsilon
-
-        
-    def __call__(self, logits: Tensor, targets: Tensor) -> Tensor:
-        """
-        Compute weighted cross-entropy.
-        """
-
-        #update weights 
-        counts = torch.bincount(targets, minlength=self.n_classes)
-        prop = counts.float()/targets.numel() 
-        prop = torch.add(prop, self.epsilon) # avoid dividing by 0 
-        weights = torch.div(self.global_distrib.to(self.device), prop.to(self.device))
-        
-        logits = logits.to(self.device)
-        targets = targets.to(self.device)
-        
-        log_probs = torch.log_softmax(logits, dim=1)
-        loss_per_sample = -log_probs[torch.arange(len(targets)), targets]
-        loss_per_sample = loss_per_sample * weights[targets]
-
-        return loss_per_sample.mean()
-
-
-
-# AlphaWoLA
-################################################################################################
-class AlphaWoLA:
-    def __init__(
-        self,
-        device: torch.device,
-        local_distributions: Tensor,
-        Byzantine_local_distribution: Tensor,
-        n_classes:int,
-        worker_id: int,
-        epsilon: float = 1e-3, 
-        under_attack: bool = False,
-    ):
-        """
-        Worker Label Alignment loss (WoLA).
-        Computes class weights based on local vs global data imbalance.
-        """
-        self.device = torch.device(device)
-        
-        if under_attack:
-            self.weight = self.get_weight_under_attack(local_distributions, Byzantine_local_distribution, worker_id, epsilon)
-        else:
-            self.weight = self.get_weight(local_distributions, Byzantine_local_distribution, worker_id, epsilon)
-               
-
-    def get_weight(self, local_distributions: Tensor, Byzantine_local_distribution: Tensor, worker_id: int, epsilon: float) -> Tensor:
-        """
-        Compute per-class weights based on global and local distributions.
-        """
-        # Compute global distribution
-        global_count = local_distributions.sum(dim=0)
-        global_total = global_count.sum()
-        global_distribution = global_count / global_total
-
-        # Compute local distribution
-        honest_and_Byzantine_distributions = torch.cat((local_distributions, Byzantine_local_distribution), dim=0)
-        local_count = honest_and_Byzantine_distributions[worker_id]
-        local_total = local_count.sum()
-        local_distribution = local_count / local_total
-
-        list_local_count = list(local_count) 
-        tot = 0
-        for idx, elem in enumerate(list_local_count) : 
-            if elem > 0 : 
-                tot += global_distribution[idx]/elem  
-
-        # Compute weight
-        weight = global_distribution / ((local_distribution + epsilon)*tot)
-        return weight.float().to(self.device)
-
-    
-    def get_weight_under_attack(self, local_distributions: Tensor, Byzantine_local_distribution: Tensor, worker_id: int, epsilon: float) -> Tensor:
-        """
-        Compute per-class weights based on global and local distributions.
-        """
-        # Compute local distribution (even for Byzantine workers, although this is not used in the following, we do it for code consistency)
-        honest_and_Byzantine_distributions = torch.cat((local_distributions, Byzantine_local_distribution), dim=0)
-        local_count = honest_and_Byzantine_distributions[worker_id]
-        local_total = local_count.sum()
-        local_distribution = local_count / local_total
-    
-        # Compute global distribution (impacted by Byzantine attack)
-        
-        ## Least common class
-        global_honest_count = local_distributions.sum(dim=0)
-        least_common_class = torch.argmin(global_honest_count)
-
-        ## Compute worst Byzantine distribution (i.e., all mass on the least common class)
-        total_Byzantine_count = Byzantine_local_distribution.sum(dim=1)
-        worst_Byzantine_local_distribution = torch.zeros_like(Byzantine_local_distribution)    
-        worst_Byzantine_local_distribution[:, least_common_class] = total_Byzantine_count
-
-        ## Compute robust distribution
-        honest_and_worst_Byzantine_distributions = torch.cat((local_distributions, worst_Byzantine_local_distribution), dim=0)
-        global_count = rfa([d.float() for d in honest_and_worst_Byzantine_distributions])
-        global_total = global_count.sum()
-        global_distribution = global_count / global_total
-        
-        # Compute weight
-        weight = global_distribution / (local_distribution + epsilon)
-        return weight.float().to(self.device)
-
-        
-    def __call__(self, logits: Tensor, targets: Tensor) -> Tensor:
-        """
-        Compute weighted cross-entropy.
-        """
-        logits = logits.to(self.device)
-        targets = targets.to(self.device)
-        
-        log_probs = torch.log_softmax(logits, dim=1)
-        loss_per_sample = -log_probs[torch.arange(len(targets)), targets]
-        loss_per_sample = loss_per_sample * self.weight[targets]
-
-        return loss_per_sample.mean()
 
 
 
