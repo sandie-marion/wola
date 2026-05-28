@@ -64,13 +64,13 @@ def get_mean_filter_score (path, n, f) :
     return byz 
 
 
-def get_file_name (dataset, agg, pre_agg, alpha, attack, f, const) : 
+def get_file_name (dataset, agg, pre_agg, criterion, alpha, attack, f, const) : 
     experiment_id = f"{attack}_" 
     experiment_id += f"{agg}_" 
     experiment_id += f"{pre_agg}_" 
     if agg == "HullGuard" : 
         experiment_id += "random_"
-    experiment_id += f"{const["criterion_name"]}_" 
+    experiment_id += f"{criterion}_" 
     experiment_id += f"{dataset}_" 
     experiment_id += f"{f}_" 
     experiment_id += f"{alpha}_" 
@@ -81,44 +81,16 @@ def get_file_name (dataset, agg, pre_agg, alpha, attack, f, const) :
 
     return experiment_id
 
-def get_filter_file_name (dataset, agg, pre_agg, alpha, attack, f, const) : 
-    experiment_id = f"{attack}_" 
-    experiment_id += f"{agg}_" 
-    experiment_id += f"{pre_agg}_" 
-    if agg == "HullGuard" : 
-        experiment_id += "random_"
-    experiment_id += f"{const["criterion_name"]}_" 
-    experiment_id += f"{dataset}_" 
-    experiment_id += f"{f}_" 
-    experiment_id += f"{alpha}_" 
-    experiment_id += f"{const["n_workers"]}_" 
-    experiment_id += f"{const["batch_size"]}_" 
-    experiment_id += f"{const["beta"]}" 
-    experiment_id += '_filter_score.pt'
-
-    return experiment_id
 
 
-
-def get_pandas_results () : 
-    experiment_folder = 'test_seed1'
+def get_pandas_results (variable_parameters) : 
+    experiment_folder = 'test_wola'
 
     constant_parameters = {
                     'n_workers': 60,
-                    'batch_size': 32,
-                    'beta': 0.9,
-                    'criterion_name': 'CrossEntropy'
+                    'batch_size': 128,
+                    'beta': 0.9
                 }
-
-
-    variable_parameters = {
-                        "attack_name": ["ALIE","FOE","Mimic","MinSum","LF"],
-                        "aggregator_name": ["CWMed","CwTM","RFA", "GAS", "HullGuard"],
-                        "pre_aggregator_name": ["BKT"],
-                        "n_byzantine_workers" : [8, 14, 20, 26],
-                        "alpha" : [10, 1, 0.1], 
-                        'dataset_name': ["CIFAR10", "MNIST", "Fashion_MNIST", "EuroSAT"]
-                    }
     
 
     index = [[], [], [], []]
@@ -127,12 +99,13 @@ def get_pandas_results () :
         for alpha in variable_parameters["alpha"] :
             for agg in variable_parameters["aggregator_name"]: 
                 for pre_agg in variable_parameters["pre_aggregator_name"] :
-                    if agg == "HullGuard" : 
-                        pre_agg = "BKT"
-                    index[0].append(dataset)
-                    index[1].append(alpha)
-                    index[2].append(agg)
-                    index[3].append(pre_agg) 
+                    for criterion in variable_parameters["criterion_name"] : 
+                        index[0].append(dataset)
+                        index[1].append(alpha)
+                        combi = f"{pre_agg}+{agg}" if pre_agg != "None" else agg
+                        index[2].append(combi)
+                        criterion = "CE" if criterion != "DistribWoLA" else "NS"
+                        index[3].append(criterion) 
 
     columns = [[], []]
     
@@ -147,21 +120,18 @@ def get_pandas_results () :
         for alpha in variable_parameters["alpha"] : 
             for agg in variable_parameters["aggregator_name"]: 
                 for pre_agg in variable_parameters["pre_aggregator_name"] :
+                    for criterion in variable_parameters["criterion_name"] : 
                     # 1 ligne du tableau 
-                    row = []
-                    for attack in variable_parameters["attack_name"] : 
-                        for f in variable_parameters["n_byzantine_workers"] : 
-                            if agg == "HullGuard" : 
-                                pre_agg = "None"
-                                if f == 22 : 
-                                    f = 20
-                            file_name = get_file_name(dataset, agg, pre_agg, 
-                                                      alpha, attack, f, 
-                                                      constant_parameters)
-                            path = join(experiment_folder, file_name) 
-                            acc = get_mean_accuracy(path) 
-                            row.append(acc) 
-                    values.append(row) 
+                        row = []
+                        for attack in variable_parameters["attack_name"] : 
+                            for f in variable_parameters["n_byzantine_workers"] : 
+                                file_name = get_file_name(dataset, agg, pre_agg, criterion,
+                                                        alpha, attack, f, 
+                                                        constant_parameters)
+                                path = join(experiment_folder, file_name) 
+                                acc = get_mean_accuracy(path) 
+                                row.append(acc) 
+                        values.append(row) 
 
 
     df = pd.DataFrame(values, index=index, columns=columns)
@@ -169,70 +139,3 @@ def get_pandas_results () :
     return df 
 
 
-def get_hullguard_filter_result () : 
-    experiment_folder = 'test_seed1'
-
-    constant_parameters = {
-                    'n_workers': 60,
-                    'batch_size': 32,
-                    'beta': 0.9,
-                    'criterion_name': 'CrossEntropy',
-                    "aggregator_name": "HullGuard",
-                    "pre_aggregator_name": "None"
-                }
-
-
-    variable_parameters = {
-                        "attack_name": ["ALIE","FOE","Mimic","MinSum","LF"],
-                        "n_byzantine_workers" : [8, 14, 20, 26],
-                        "alpha" : [10, 1, 0.1], 
-                        'dataset_name': ["CIFAR10", "MNIST", "Fashion_MNIST", "EuroSAT"]
-                    }
-    
-
-    index = [[], []]
-
-    for dataset in variable_parameters["dataset_name"] :
-        for alpha in variable_parameters["alpha"] :
-            index[0].append(dataset)
-            index[1].append(alpha)
-
-    columns = [[], []]
-    
-    for attack in variable_parameters["attack_name"] : 
-        for f in variable_parameters["n_byzantine_workers"] :
-            columns[0].append(attack)
-            columns[1].append(f) 
-
-
-    values = [] 
-    agg = constant_parameters["aggregator_name"]
-    pre_agg = constant_parameters["pre_aggregator_name"]
-    for dataset in variable_parameters["dataset_name"] :
-        for alpha in variable_parameters["alpha"] : 
-            # 1 ligne du tableau 
-            row = []
-            for attack in variable_parameters["attack_name"] : 
-                for f in variable_parameters["n_byzantine_workers"] : 
-                    file_name = get_filter_file_name(dataset, agg, pre_agg, 
-                                                alpha, attack, f, 
-                                                constant_parameters)
-                
-                    path = join(experiment_folder, file_name) 
-                    filter_score = get_mean_filter_score(path, constant_parameters['n_workers'], f) 
-                    row.append(filter_score) 
-            values.append(row) 
-
-
-    df = pd.DataFrame(values, index=index, columns=columns)
-    print(df)
-    return df 
-
-
-
-
-
-if __name__ == "__main__" : 
-    get_pandas_results() 
-
-    

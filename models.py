@@ -15,8 +15,9 @@ def get_model(dataset_name: str, device: torch.device) -> Module:
         'MNIST': (NIST_Model, 10),
         'Fashion_MNIST': (NIST_Model, 10),
         'Purchase100': (Purchase100_Model, 100),
-        'EMNIST' : (NIST_Model, 62),
-        'EuroSAT' : (EuroSAT_Model, 10)
+        'KMNIST' : (NIST_Model, 49),
+        'EuroSAT' : (EuroSAT_Model, 10), 
+        'STL10' : (STL10_Model, 10)
     }
 
     if dataset_name not in model_mapping:
@@ -168,52 +169,81 @@ class EuroSAT_Model(Module):
     def __init__(self, n_classes):
         super(EuroSAT_Model, self).__init__()
 
-        # Convolutional Layers
-        self.conv1 = nn.Conv2d(in_channels=3, out_channels=64, kernel_size=5, stride=1, padding=0)
-        self.bn1 = nn.BatchNorm2d(64)
+        self.features = nn.Sequential(
+            # Conv 1
+            nn.Conv2d(3, 32, kernel_size=3, padding=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            nn.MaxPool2d(2),   # 96 -> 48
 
-        self.conv2 = nn.Conv2d(in_channels=64, out_channels=64, kernel_size=5, stride=1, padding=0)
-        self.bn2 = nn.BatchNorm2d(64)
+            # Conv 2
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.MaxPool2d(2),   # 48 -> 24
 
-        self.conv3 = nn.Conv2d(in_channels=64, out_channels=128, kernel_size=5, stride=1, padding=0)
-        self.bn3 = nn.BatchNorm2d(128)
+            # Conv 3
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(),
+            nn.MaxPool2d(2),   # 24 -> 12
 
-        self.conv4 = nn.Conv2d(in_channels=128, out_channels=128, kernel_size=5, stride=1, padding=0)
-        self.bn4 = nn.BatchNorm2d(128)
+            # Conv 4
+            nn.Conv2d(128, 256, kernel_size=3, padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool2d((1, 1))
+        )
 
-        self.maxpool = nn.MaxPool2d(kernel_size=2)
-        self.dropout = nn.Dropout(p=0.25)
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Dropout(0.3),
+            nn.Linear(256, 10)
+        )
 
-        self.fc1 = nn.Linear(128 * 10 * 10, 128)
-        self.fc2 = nn.Linear(128, n_classes)
+    def forward(self, x):
+        x = self.features(x)
+        x = self.classifier(x)
+        return x
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.conv1(x)
-        x = F.relu(x)
-        x = self.bn1(x)
 
-        x = self.conv2(x)
-        x = F.relu(x)
-        x = self.bn2(x)
-        x = self.maxpool(x)
-        x = self.dropout(x)
+class STL10_Model(Module):
+    def __init__(self, n_classes):
+        super(STL10_Model, self).__init__()
 
-        x = self.conv3(x)
-        x = F.relu(x)
-        x = self.bn3(x)
+        self.features = nn.Sequential(
+            # Conv 1
+            nn.Conv2d(3, 32, kernel_size=3, padding=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            nn.MaxPool2d(2),   # 96 -> 48
 
-        x = self.conv4(x)
-        x = F.relu(x)
-        x = self.bn4(x)
-        x = self.maxpool(x)
-        x = self.dropout(x)
+            # Conv 2
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.MaxPool2d(2),   # 48 -> 24
 
-        x = torch.flatten(x, 1) 
+            # Conv 3
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(),
+            nn.MaxPool2d(2),   # 24 -> 12
 
-        x = self.fc1(x)
-        x = F.relu(x)
-        x = self.dropout(x)
+            # Conv 4
+            nn.Conv2d(128, 256, kernel_size=3, padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool2d((1, 1))
+        )
 
-        x = self.fc2(x)
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Dropout(0.3),
+            nn.Linear(256, 10)
+        )
 
+    def forward(self, x):
+        x = self.features(x)
+        x = self.classifier(x)
         return x

@@ -8,6 +8,7 @@ from Attacks.nearest_neighbor_poisoning import NearestNeighborPoisoning
 from Attacks.poisoned_fl import PoisonedFL
 from byzfl.utils.misc import check_vectors_type
 
+from time import sleep 
 
 # Class Attacks
 ################################################################################################
@@ -53,12 +54,11 @@ class Attack:
 
         elif self.name == 'MinSum':
             # MinSum attack
-            minsum = MinSum(**kwargs)
+            minsum = MinMax_MinSum(aggregator, False, **kwargs)
             self.attack = minsum
 
         elif self.name == 'MinMax':
-            # MinMax attack
-            minmax = MinMax(**kwargs)
+            minmax = MinMax_MinSum(aggregator, True, **kwargs)
             self.attack = minmax
 
         elif self.name == 'PoisonedFL':
@@ -452,46 +452,8 @@ class FallOfEmpires:
         # Set the best attack factor and execute IPM
         return self.foe(honest_vectors, best_tau)
 
-        
 
-# Min-Max
-################################################################################################
-class MinMax:
-    @torch.no_grad()
-    def __call__(self, row_honest_gradients: List[torch.Tensor]) -> torch.Tensor:
-        G = torch.stack(row_honest_gradients, dim=0)   # (n, d)
-        device = G.device
-    
-        mu = G.mean(dim=0)                             # (d,)
-        perturbation = -mu / mu.norm()                 # unit direction
-    
-        # max pairwise honest distance
-        dists = torch.cdist(G, G)                      # (n, n)
-        honest_distance = dists.max()
-    
-        gamma = torch.tensor(50.0, device=device)
-        threshold_diff = 1e-5
-        gamma_fail = gamma
-        gamma_succ = torch.tensor(0.0, device=device)
-    
-        while torch.abs(gamma_succ - gamma) > threshold_diff:
-            byzantine_update = mu - gamma * perturbation
-            dists = torch.norm(byzantine_update - G, dim=1)
-            honest_byzantine_dist = dists.max()
-    
-            if honest_byzantine_dist <= honest_distance:
-                gamma_succ = gamma
-                gamma = gamma + gamma_fail / 2
-            else:
-                gamma = gamma - gamma_fail / 2
-    
-            gamma_fail = gamma_fail / 2
-    
-        byzantine_update = mu - gamma_succ * perturbation
-        return byzantine_update
 
-# Min-Sum
-################################################################################################
 class MinSum:
     @torch.no_grad()
     def __call__(self, row_honest_gradients: List[torch.Tensor]) -> torch.Tensor:
@@ -525,3 +487,112 @@ class MinSum:
 
         byzantine_update = mu - gamma_succ * perturbation
         return byzantine_update
+        
+
+class MinMax_MinSum:
+    def __init__(self, aggregator, MinMax, f, gamma_init=10.0, tau=1e-3):
+        """
+        aggregator: aggregation rule (function)
+        f: number of Byzantine clients
+        MinMax: whether to use MinMax attack (True) or MinSum attack (False)
+        gamma_init: initial step size for line search
+        tau: stopping threshold for gamma search
+        """
+        self.agg = aggregator
+        self.f = f
+        self.gamma_init = gamma_init
+        self.tau = tau
+        self.MinMax = MinMax
+
+    def evaluate(self, honest_vectors, mu, byzantine_update):
+        """
+        Evaluate how much the Byzantine update shifts the aggregation result.
+        """
+        # Replicate the same Byzantine vector f times
+        byzantine_updates = torch.stack([byzantine_update] * self.f, dim=0)
+
+        # Combine honest and Byzantine vectors
+        vectors = torch.cat((honest_vectors, byzantine_updates), dim=0)
+
+        # Apply aggregation rule
+        aggregated_vector = self.agg(list(vectors))
+
+        # Return distance to honest mean (attack strength)
+        return torch.norm(aggregated_vector - mu).item()
+
+    @torch.no_grad()
+    def __call__(self, row_honest_gradients: List[torch.Tensor]) -> torch.Tensor:
+        """
+        Generate a Byzantine vector that maximizes deviation after aggregation.
+        """
+        # Stack gradients into matrix (n_clients, dim)
+        G = torch.stack(row_honest_gradients, dim=0)
+        device = G.device
+
+        # Compute statistics of honest gradients
+        mu = G.mean(dim=0)
+        std = G.std(dim=0, unbiased=False)
+
+        # Normalize mean to get a direction
+        mu_norm = torch.norm(mu) + 1e-12
+
+        # Candidate attack directions
+        perturbations = [
+            -mu / mu_norm,   # opposite mean direction
+            -std,            # high variance direction
+            -torch.sign(mu), # opposite sign direction
+        ]
+
+        # Compute constraint based on honest distances
+        honest_distance_matrix = torch.cdist(G, G)
+
+        if self.MinMax:
+            # Max pairwise distance
+            honest_distance = honest_distance_matrix.max()
+        else:
+            # Sum-based distance (MinSum-style)
+            honest_distance = honest_distance_matrix.pow(2).sum(dim=1).max()
+
+        byzantine_updates = []
+
+        # Search best scaling (gamma) for each perturbation/direction
+        for perturbation in perturbations:
+            gamma_succ = torch.tensor(0.0, device=device)
+            gamma = torch.tensor(float(self.gamma_init), device=device)
+            step = gamma
+
+            # Binary-like search for largest valid gamma
+            while torch.abs(gamma_succ - gamma) > self.tau:
+                byzantine_update = mu + gamma * perturbation
+
+                # Distance between Byzantine and honest gradients
+                if self.MinMax:
+                    byzantine_dist = torch.norm(byzantine_update - G, dim=1).max()
+                else:
+                    byzantine_dist = torch.norm(byzantine_update - G, dim=1).pow(2).sum()
+
+                # Check constraint
+                if byzantine_dist <= honest_distance:
+                    gamma_succ = gamma   # valid â†’ increase
+                    gamma = gamma + step / 2
+                else:
+                    gamma = gamma - step / 2     # invalid â†’ decrease
+                step = step / 2
+                
+            # Store best vector for this direction
+            byzantine_updates.append(mu + gamma_succ * perturbation)
+
+        # Select the attack that maximizes aggregation deviation
+        best_score = None
+        best_idx = 0
+
+        for idx, byzantine_update in enumerate(byzantine_updates):
+            score = self.evaluate(G, mu, byzantine_update)
+
+            if best_score is None or score > best_score:
+                best_idx = idx
+                best_score = score
+
+        return byzantine_updates[best_idx]
+
+

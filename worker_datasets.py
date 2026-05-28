@@ -74,6 +74,10 @@ def worker_distributions(n_honest_workers: int, n_byzantine_workers: int, alpha:
         gobal_dataset_size = 697932
     elif dataset_name == 'EuroSAT' :
         gobal_dataset_size = 22950
+    elif dataset_name == "STL10" : 
+        gobal_dataset_size = 8000
+    elif dataset_name == "KMNIST" : 
+        gobal_dataset_size = 60000
         
     local_dataset_size = gobal_dataset_size // n_honest_workers
     
@@ -171,7 +175,7 @@ def get_dataset(dataset_name: str) -> tuple:
         train_set = datasets.FashionMNIST(root="./data", train=True, transform=transform_train, download=True)
         test_set = datasets.FashionMNIST(root="./data", train=False, transform=transform_test, download=True)
     
-    elif dataset_name == "EMNIST" : 
+    elif dataset_name == "KMNIST" : 
         transform_train = transforms.Compose([
             transforms.ToTensor(),
             transforms.Normalize(mean=(0.1307,), std=(0.3081,))
@@ -181,8 +185,8 @@ def get_dataset(dataset_name: str) -> tuple:
             transforms.Normalize(mean=(0.1307,), std=(0.3081,))
         ])
     
-        train_set = datasets.EMNIST(root="./data", split="byclass", train=True, transform=transform_train, download=True)
-        test_set = datasets.EMNIST(root="./data", split="byclass", train=False, transform=transform_test, download=True)
+        train_set = datasets.KMNIST(root="./data", train=True, transform=transform_train, download=True)
+        test_set = datasets.KMNIST(root="./data", train=False, transform=transform_test, download=True)
         
     elif dataset_name == "EuroSAT" : 
 
@@ -193,7 +197,28 @@ def get_dataset(dataset_name: str) -> tuple:
                 ]) )
 
         train_set, test_set = random_split(global_set, [0.85, 0.15])
+
+    elif dataset_name == "STL10" :
+
+        transform_train = transforms.Compose([
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=(0.4914, 0.4822, 0.4465),
+                     std=(0.2023, 0.1994, 0.2010))
+        ])
+        transform_test = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(mean=(0.4914, 0.4822, 0.4465),
+                     std=(0.2023, 0.1994, 0.2010))
+        ])
+    
+        train_set = datasets.STL10(root="./data", split="test", transform=transform_train, download=True)
+        test_set = datasets.STL10(root="./data", split="train", transform=transform_test, download=True)
         
+        
+    elif dataset_name == "Purchase100":
+        train_set = Purchase100Dataset(train_bool=True)
+        test_set = Purchase100Dataset(train_bool=False)
         
     else: 
         raise ValueError(f"Unsupported dataset: {dataset_name}")
@@ -221,9 +246,10 @@ def draw_worker_loaders(distributions:torch.Tensor , train_set: torch.utils.data
     count_of_classes = distributions.sum(0)
 
     # Get indices of samples belonging to each class
-    if len(train_set) == 22950 : 
-        print("dataset is EuroSAT") 
+    if len(train_set) == 22950 :  
         targets = [train_set.dataset.targets[i] for i in train_set.indices]
+    elif len(train_set) == 8000 : 
+        targets = train_set.labels 
     else : 
         targets = train_set.targets
     if not isinstance(targets, torch.Tensor):

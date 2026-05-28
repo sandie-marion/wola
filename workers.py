@@ -4,7 +4,7 @@ from torch.utils.data import DataLoader
 from gradients import flatten_gradients
 from losses import Loss
 from copy import deepcopy
-from DistribBatchProvider import DistribBatchProvider
+from DistribBatchProvider import StratifiedBatchSampler
 
 # Class for a worker
 ################################################################################################
@@ -15,7 +15,8 @@ class Worker:
                  criterion_name: str, 
                  criterion_parameters:dict,
                  train_loader: DataLoader,
-                 model: nn.Module) -> None:
+                 model: nn.Module,
+                 dataset_name: str) -> None:
         """
         Initialize a Worker instance.
         """
@@ -33,14 +34,19 @@ class Worker:
         
         # Local dataset
         self.train_loader = train_loader
-
         #WoLA specific loader : 
-        self.distrib_loader = None
-        if criterion_name == "WoLA" : 
-            self.distrib_loader = DistribBatchProvider(self.train_loader.dataset, 
-                                                       self.train_loader.batch_size, 
-                                                       self.criterion.loss.distrib, 
-                                                       self.criterion.loss.n_classes)
+        if criterion_name == "DistribWoLA" : 
+            if dataset_name == "EuroSAT" : 
+                labels = [train_loader.dataset.dataset.dataset.targets[i] for i in train_loader.dataset.indices] 
+            elif dataset_name == "STL10" : 
+                labels = [train_loader.dataset.dataset.labels[i] for i in train_loader.dataset.indices] 
+            else : 
+                labels = [train_loader.dataset.dataset.targets[i] for i in train_loader.dataset.indices] 
+            batch_size = train_loader.batch_size
+            distrib = self.criterion.loss.distrib
+            self.sampler = StratifiedBatchSampler(labels, batch_size, distrib) 
+
+            self.train_loader = DataLoader(train_loader.dataset, batch_sampler=self.sampler) 
     
 
 
@@ -112,7 +118,8 @@ class Workers:
                  worker_loaders: list, 
                  criterion_name: str, 
                  criterion_parameters: dict, 
-                 model: nn.Module) -> None:
+                 model: nn.Module, 
+                 dataset_name: str) -> None:
         # Total number of workers
         self.n_workers = n_honest_workers + n_byzantine_workers
         
@@ -128,7 +135,7 @@ class Workers:
             local_loader = worker_loaders[worker_id]
             
             # Create a Worker instance and add it to the list
-            worker = Worker(worker_id, is_honest, criterion_name, criterion_parameters, local_loader, model)
+            worker = Worker(worker_id, is_honest, criterion_name, criterion_parameters, local_loader, model, dataset_name)
             self.workers.append(worker)
         
     def is_honest(self, worker_id: int) -> bool:

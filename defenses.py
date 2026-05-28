@@ -51,20 +51,18 @@ class Aggregator:
             return coordinate_wise_median
             
         elif self.aggregator_name == 'CwTM':
-            return TrMean(**self.aggregator_args)
+            return lambda inputs : coordinate_wise_trimmed_mean(inputs, **self.aggregator_args)
         elif self.aggregator_name == 'RFA':
             return lambda inputs: rfa(inputs, **self.aggregator_args)
         
         elif self.aggregator_name == 'Krum':
-            return lambda inputs: multi_krum(inputs, **self.aggregator_args)
+            return lambda inputs: krum(inputs, **self.aggregator_args)
 
         elif self.aggregator_name == "GAS" : 
             return lambda inputs : gas_aggregate(inputs, **self.aggregator_args)
-        
-        elif self.aggregator_name == 'HullGuard':
-            f_rfa =  lambda inputs: rfa(inputs)
-            hullguard = HullGuard(agg=f_rfa, **self.aggregator_args)
-            return lambda inputs, pi: hullguard(inputs, pi)
+
+        elif self.aggregator_name == "Bulyan" : 
+            return lambda inputs : bulyan(inputs, **self.aggregator_args) 
 
         else:
             raise ValueError("Unknown aggregator")
@@ -388,10 +386,14 @@ def rfa(inputs: list, T: int = 3, nu: float = 0.1) -> torch.Tensor:
 ################################################################################################
 @torch.no_grad() 
 def agg_bulyan(inputs: list, f : int):
-    n_cl = len(inputs)
+
+    if not isinstance(inputs, torch.Tensor):
+        inputs = torch.stack(inputs, dim=0)
+        
+    n_cl, d = inputs.shape
     n_byz = f
 
-    tensor = torch.stack(inputs, dim=0)
+    tensor = inputs
 
     squared_dists = torch.cdist(tensor, tensor).square()
     topk_dists, _ = squared_dists.topk(k=n_cl - n_byz -1, dim=-1, largest=False, sorted=False)    
@@ -448,3 +450,111 @@ def split(flat_models, gas_p):
     partition = torch.chunk(shuffled_dims, chunks=p)
     groups = [flat_models[:, partition_i] for partition_i in partition]
     return groups
+
+
+
+##### KRUM 
+
+@torch.no_grad()
+def krum_index(inputs: torch.Tensor, f: int) -> torch.Tensor:
+    """
+    Return the index selected by the Krum rule.
+
+    Args:
+        inputs: tensor of shape (n, d)
+        f: number of Byzantine (malicious) vectors
+
+    Returns:
+        index of the selected vector
+    """
+    n = inputs.size(0)
+
+    # Pairwise squared Euclidean distances: (n, n)
+    dist = torch.cdist(inputs, inputs, p=2).pow(2)
+
+    # For each vector, keep distances to its closest (n - f - 2) neighbors
+    k = n - f - 2
+    closest = torch.topk(dist, k=k + 1, dim=1, largest=False).values[:, 1:]
+
+    # Krum score = sum of these distances
+    scores = closest.sum(dim=1)
+
+    # Return index with smallest score
+    return scores.argmin()
+
+
+@torch.no_grad()
+def krum(inputs, f: int) -> torch.Tensor:
+    """
+    Return the vector selected by the Krum rule.
+    """
+    if not isinstance(inputs, torch.Tensor):
+        inputs = torch.stack(inputs, dim=0)
+
+    idx = krum_index(inputs, f)
+    return inputs[idx]
+
+
+@torch.no_grad()
+def bulyan(inputs, f: int) -> torch.Tensor:
+    """
+    Bulyan aggregation rule (robust to Byzantine workers).
+
+    Args:
+        inputs: list or tensor of shape (n, d)
+        f: number of Byzantine vectors
+
+    Returns:
+        aggregated vector of shape (d,)
+    """
+    if not isinstance(inputs, torch.Tensor):
+        inputs = torch.stack(inputs, dim=0)
+
+    n, d = inputs.shape
+
+    if n < 4 * f + 3:
+        raise ValueError("Bulyan requires n >= 4f + 3.")
+
+    # Number of vectors selected by Krum phase
+    theta = n - 2 * f
+    # Number of values kept per coordinate
+    beta = theta - 2 * f  # = n - 4f
+
+    remaining = inputs
+    selected = []
+
+    # Step 1: iteratively select vectors using Krum
+    for _ in range(theta):
+        idx = krum_index(remaining, f)
+        selected.append(remaining[idx])
+
+        # Remove selected vector from pool
+        mask = torch.ones(
+            remaining.size(0),
+            dtype=torch.bool,
+            device=remaining.device,
+        )
+        mask[idx] = False
+        remaining = remaining[mask]
+
+    # Shape: (theta, d)
+    selected = torch.stack(selected, dim=0)
+
+    # Step 2: coordinate-wise trimmed mean around the median
+    medians = selected.median(dim=0).values  # (d,)
+
+    # Distance of each value to coordinate-wise median
+    distances = torch.abs(selected - medians)
+
+    # For each coordinate, keep beta closest values to the median
+    closest_idx = torch.topk(
+        distances,
+        k=beta,
+        dim=0,
+        largest=False,
+    ).indices
+
+    # Gather selected values and average
+    gathered = torch.gather(selected, dim=0, index=closest_idx)
+
+    return gathered.mean(dim=0)

@@ -39,12 +39,19 @@ def get_attack_parameters(kwargs):
                 'clip_param' : kwargs['clip_param'], 
                 'beta' : kwargs['beta']
                 }
+    elif kwargs['attack_name'] == 'MinSum' or kwargs['attack_name'] == 'MinMax': 
+        return {
+            'f' : kwargs['n_byzantine_workers'], 
+            'gamma_init' : 10.0, 
+            'tau' : 1e-3
+        }
     else:
         return {}
 
+
 def get_aggregator_parameters(kwargs):
     if kwargs['aggregator_name'] == 'CwTM':
-        return {'f': kwargs['n_byzantine_workers']}
+        return {'q': kwargs['n_byzantine_workers']}
     elif kwargs['aggregator_name'] == 'RFA':
         return {'T': 10, 'nu': 0.1}
     elif kwargs['aggregator_name'] == 'Krum':
@@ -55,8 +62,6 @@ def get_aggregator_parameters(kwargs):
                 'base_agg' : 'krum'}
     elif kwargs['aggregator_name'] == 'Bulyan' : 
         return {'f':kwargs['n_byzantine_workers']}
-    elif kwargs['aggregator_name'] == 'HullGuard':
-        return {'C': kwargs['n_classes'], 'h': kwargs['n_honest_workers'], 'f': kwargs['n_byzantine_workers']}
     else:
         return {}
         
@@ -229,7 +234,7 @@ def run(kwargs: dict) -> None:
     criterion_parameters['n_classes'] = n_classes 
     
     # Initialize workers
-    workers = Workers(n_honest_workers, n_byzantine_workers, worker_loaders, criterion_name, criterion_parameters, model)
+    workers = Workers(n_honest_workers, n_byzantine_workers, worker_loaders, criterion_name, criterion_parameters, model, dataset_name)
     
     # Save experiment parameters
     kwargs_to_save = {k: v for k, v in kwargs.items() if k != 'lr'} # Exclude 'lr' because it is a function and should not be saved
@@ -261,28 +266,36 @@ def parse_args():
 
 
 def multiple_exp () : 
+
+
+    #                         'attack_name': ['ALIE','FOE','Mimic','SF','PoisonedFL','MinMax','MinSum','NNP'],
+    #                         'aggregator_name': ['CWMed','CwTM','RFA','Krum','Mean'],
+    #                         'pre_aggregator_name': ['None','NNM','BKT','FoundFL'],
+    #                         'criterion_name': ['CrossEntropy','FedLC','DMFL'],
+    #                         'dataset_name': ['Purchase100', 'MNIST', 'CIFAR10', 'Fashion_MNIST'],
+
     variable_parameters = {
-                            'attack_name': ['ALIE', 'Mimic', 'FOE'],
-                            'aggregator_name': ['Krum'],
-                            'pre_aggregator_name': ['None'],
-                            'criterion_name': ["WoLA", "DistribWoLA"],
-                            'dataset_name': ['CIFAR10'],
-                            'n_byzantine_workers' : [2, 8, 12, 16, 20], 
-                            'alpha' : [1]
+                            'attack_name': ['LF', 'FOE'],
+                            'aggregator_name': ['RFA', 'CwTM', 'CWMed'],
+                            'pre_aggregator_name': ['NNM'],
+                            'criterion_name': ["DistribWoLA", "CrossEntropy"],
+                            'dataset_name': ['CIFAR10', 'MNIST', 'Fashion_MNIST', 'EuroSAT'],
+                            'n_byzantine_workers' : [26], 
+                            'alpha' : [1, 0.1, 10]
                         }
 
-    gpu_list = range(torch.cuda.device_count())
+    gpu_list = [0, 1, 2]
     gpu_selection = 0
     
 
     constant_parameters = {
                     'n_workers': 60,
-                    'batch_size': 64,
-                    'reg_param':1e-4,
+                    'batch_size': 128,
+                    'reg_param':1e-3,
                     'clip_param': 5,
                     'beta': 0.9,
                     'seed': 1,
-                    'experiment_folder':'test_wola_distrib',
+                    'experiment_folder':'test_wola',
                     'heterogeneous_distribution' : 0
                 }
     
@@ -315,7 +328,7 @@ def multiple_exp () :
         all_parameters['n_classes'] = n_classes
 
         if torch.cuda.is_available(): 
-            n_gpu = gpu_selection % torch.cuda.device_count() 
+            n_gpu = gpu_selection % torch.cuda.device_count()
             device = torch.device(f"cuda:{n_gpu}")
             all_parameters['device'] = device
             
@@ -340,10 +353,10 @@ def multiple_exp () :
         infered_parameters['n_experiments'] = n_experiments
         
         if all_parameters['dataset_name'] == 'MNIST' or all_parameters['dataset_name'] == 'EMNIST' or all_parameters['dataset_name'] == 'Fashion_MNIST' or all_parameters['dataset_name'] == 'EuroSAT' :
-            infered_parameters['n_step'] =  251
+            infered_parameters['n_step'] =  501
             infered_parameters['lr'] = lr_MNIST
         else:
-            infered_parameters['n_step'] =  501 
+            infered_parameters['n_step'] =  801 
             infered_parameters['lr'] = lr_CIFAR10_Purchase100
 
         if experiment_id not in already_done : 
@@ -351,20 +364,8 @@ def multiple_exp () :
             experiments.append(kwargs)
 
     print("NB EXP :", len(experiments))
-    how_many_in_parallel = 1
-    mini_batch_of_combinations = split_list(experiments, how_many_in_parallel)
-
-
-    torch.multiprocessing.set_start_method('spawn')
-
-    for combination_batch in mini_batch_of_combinations:
-        pool = Pool()
-        pool.map(run, combination_batch)
-        pool.close()
-        pool.join()
-        torch.cuda.empty_cache()
-        gc.collect()
-
+    for exp in experiments : 
+        run(exp) 
 if __name__ == "__main__" :     
     multiple_exp()
 

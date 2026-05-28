@@ -111,45 +111,37 @@ def stochastic_heavy_ball(model, workers, aggregator, attack, train_dataset, tes
     statistics_to_save = Statistics()
     step = 0
 
-    class_grad = ClassWiseGradients(device, train_dataset, n_classes, reg_param, clip_param) 
-
     worker_iters = [iter(loader) for loader in workers.loaders()]
 
     row_aggregated_momentum = flatten_gradients([torch.zeros_like(param) for param in model.parameters()])
 
     for step in range (0, n_step) :
         start = time() 
-        print(step)
         
         for worker_id in range (0, n_workers) : 
             model.train() 
             running_loss = 0.0
 
-            if kwargs['criterion_name'] == "DistribWoLA" : 
-                batch = workers[worker_id].distrib_loader.get_batch() 
-            else :
-                try : 
-                    batch = next(worker_iters[worker_id])
-                except :
-                    worker_iters[worker_id] = iter(workers.loaders()[worker_id])
-                    batch = next(worker_iters[worker_id])
+
+            try : 
+                batch = next(worker_iters[worker_id])
+            except :
+                worker_iters[worker_id] = iter(workers.loaders()[worker_id])
+                batch = next(worker_iters[worker_id])
                 
             inputs, labels = batch 
                     
             # if an honest worker
             if workers[worker_id].honest: 
-                print("worker id :", worker_id)
                 model.zero_grad()
                 
                 inputs, labels = inputs.to(device), labels.to(device)
          
                 outputs = model(inputs)
-                print("computed output") 
 
                 reg = regularization(model, reg_param)
                 
                 loss = workers[worker_id].compute_loss(outputs, labels) + reg
-                print("computed loss") 
                 
                 loss.backward()
 
@@ -158,13 +150,10 @@ def stochastic_heavy_ball(model, workers, aggregator, attack, train_dataset, tes
                 running_loss += loss.item()/n_honest_workers
 
                 workers[worker_id].compute_momentum(model, beta) #worker.gradient stores the miniWoLA update 
-                print("momentum") 
                 
-                    
-
+                
             # if a Byzantine worker
             else:
-                print("dishonest worker id :", worker_id) 
                 # step, net, worker, inputs, labels, row_honest_gradients, device
                 row_honest_gradients = workers.get_momentums(only_honest = True, row = True)
                 row_bad_gradient = attack(step, model, workers[worker_id], inputs, labels, row_honest_gradients, device)
@@ -173,7 +162,6 @@ def stochastic_heavy_ball(model, workers, aggregator, attack, train_dataset, tes
 
         # Update model
         with torch.no_grad():
-            print("update model") 
             row_momentums = workers.get_momentums(only_honest = False, row = True)
 
             row_aggregated_momentum = aggregator(row_momentums)
@@ -235,11 +223,21 @@ def lr_CIFAR10_Purchase100(step):
     """
     Learning rate for CIFAR10 ans Purchase100.
     """
-    if step < 1500:
-        return 0.25
-    return 0.025
+    if step < 200:
+        return 0.1
+    return 0.05
 
 
+def lr_EuroSAT(step):
+    """
+    Learning rate for CIFAR10 ans Purchase100.
+    """
+    if step < 100:
+        return 0.1
+    elif step < 200 : 
+        return 0.05
+    return 0.005
+    
 def lr_MNIST(step):
     """
     Learning rate for MNIST and FashionMNIST dataset.
