@@ -1,4 +1,4 @@
-from training import lr_CIFAR10_Purchase100, lr_MNIST
+from training import lr_CIFAR10_Purchase100, lr_MNIST, lr_EuroSAT
 from utility import set_seed
 from models import get_model
 from defenses import Aggregator
@@ -39,7 +39,7 @@ def get_attack_parameters(kwargs):
                 'clip_param' : kwargs['clip_param'], 
                 'beta' : kwargs['beta']
                 }
-    elif kwargs['attack_name'] == 'MinSum' or kwargs['attack_name'] == 'MinMax': 
+    elif kwargs['attack_name'] == 'MinSum' : 
         return {
             'f' : kwargs['n_byzantine_workers'], 
             'gamma_init' : 10.0, 
@@ -275,16 +275,16 @@ def multiple_exp () :
     #                         'dataset_name': ['Purchase100', 'MNIST', 'CIFAR10', 'Fashion_MNIST'],
 
     variable_parameters = {
-                            'attack_name': ['LF', 'FOE'],
-                            'aggregator_name': ['RFA', 'CwTM', 'CWMed'],
+                            'attack_name': ['ALIE', 'Mimic', 'FOE', 'LF', 'MinSum'],
+                            'aggregator_name': ['CWMed', 'CwTM', 'RFA'],
                             'pre_aggregator_name': ['NNM'],
                             'criterion_name': ["DistribWoLA", "CrossEntropy"],
-                            'dataset_name': ['CIFAR10', 'MNIST', 'Fashion_MNIST', 'EuroSAT'],
-                            'n_byzantine_workers' : [26], 
-                            'alpha' : [1, 0.1, 10]
+                            'dataset_name': ['MNIST', 'CIFAR10', 'Fashion_MNIST'],
+                            'n_byzantine_workers' : [2, 8, 14, 20, 26], 
+                            'alpha' : [10, 1, 0.1]
                         }
 
-    gpu_list = [0, 1, 2]
+    gpu_list = [0, 1, 2, 3]
     gpu_selection = 0
     
 
@@ -328,7 +328,7 @@ def multiple_exp () :
         all_parameters['n_classes'] = n_classes
 
         if torch.cuda.is_available(): 
-            n_gpu = gpu_selection % torch.cuda.device_count()
+            n_gpu = gpu_list[gpu_selection % len(gpu_list)]
             device = torch.device(f"cuda:{n_gpu}")
             all_parameters['device'] = device
             
@@ -352,9 +352,12 @@ def multiple_exp () :
         infered_parameters['experiment_id'] = experiment_id
         infered_parameters['n_experiments'] = n_experiments
         
-        if all_parameters['dataset_name'] == 'MNIST' or all_parameters['dataset_name'] == 'EMNIST' or all_parameters['dataset_name'] == 'Fashion_MNIST' or all_parameters['dataset_name'] == 'EuroSAT' :
+        if all_parameters['dataset_name'] == 'MNIST' or all_parameters['dataset_name'] == 'EMNIST' or all_parameters['dataset_name'] == 'Fashion_MNIST' or all_parameters['dataset_name'] == 'KMNIST' :
             infered_parameters['n_step'] =  501
             infered_parameters['lr'] = lr_MNIST
+        elif all_parameters['dataset_name'] == 'EuroSAT' or all_parameters['dataset_name'] == 'STL10'  : 
+            infered_parameters['n_step'] =  501
+            infered_parameters['lr'] = lr_EuroSAT
         else:
             infered_parameters['n_step'] =  801 
             infered_parameters['lr'] = lr_CIFAR10_Purchase100
@@ -364,12 +367,20 @@ def multiple_exp () :
             experiments.append(kwargs)
 
     print("NB EXP :", len(experiments))
-    for exp in experiments : 
-        run(exp) 
+    how_many_in_parallel = len(gpu_list)*2
+    mini_batch_of_combinations = split_list(experiments, how_many_in_parallel)
+
+    torch.multiprocessing.set_start_method('spawn')
+
+    for combination_batch in mini_batch_of_combinations:
+        pool = Pool()
+        pool.map(run, combination_batch)
+        pool.close()
+        pool.join()
+        torch.cuda.empty_cache()
+        gc.collect()
+
 if __name__ == "__main__" :     
     multiple_exp()
 
 
-
-    # test mini wola : 
-    # gi(t+1) <- miniwola(t+1) + g(t) - miniwola(t)
