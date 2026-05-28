@@ -274,9 +274,6 @@ def multiple_exp (variable_parameters) :
     #                         'criterion_name': ['CrossEntropy','FedLC','DMFL'],
     #                         'dataset_name': ['Purchase100', 'MNIST', 'CIFAR10', 'Fashion_MNIST'],
 
-
-
-    gpu_list = []
     gpu_selection = 0
     
 
@@ -320,7 +317,7 @@ def multiple_exp (variable_parameters) :
         all_parameters['n_classes'] = n_classes
 
         if torch.cuda.is_available(): 
-            n_gpu = gpu_list[gpu_selection % len(gpu_list)]
+            n_gpu = gpu_selection % torch.cuda.device_count()
             device = torch.device(f"cuda:{n_gpu}")
             all_parameters['device'] = device
             
@@ -359,7 +356,7 @@ def multiple_exp (variable_parameters) :
             experiments.append(kwargs)
 
     print("NB EXP :", len(experiments))
-    how_many_in_parallel = len(gpu_list)*2 if len(gpu_list) > 0 else 1 
+    how_many_in_parallel = 10 
     mini_batch_of_combinations = split_list(experiments, how_many_in_parallel)
 
     torch.multiprocessing.set_start_method('spawn')
